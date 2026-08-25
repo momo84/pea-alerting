@@ -92,12 +92,11 @@ with st.sidebar:
         if mode == "Modifier":
             ticker = st.text_input("Ticker Yahoo", value=selected_ticker, disabled=True)
         else:
-            ticker = st.text_input("Ticker Yahoo (ex: GLE.PA, TTE.PA, CW8.PA)", value="GLE.PA").strip().upper()
+            ticker = st.text_input("Ticker Yahoo (ex: STMPA.PA, GLE.PA, CW8.PA)", value="STMPA.PA").strip().upper()
             
         qty = st.number_input("Quantité d'actions", min_value=1, value=default_qty, step=1)
         pru = st.number_input("PRU / Prix d'achat unitaire (€)", min_value=0.01, value=default_pru, step=0.05, format="%.2f")
         
-        # Calcul automatique suggéré pour les frais d'achat basés sur le montant investi en €
         estimated_buy_amount = qty * pru
         suggested_buy_fee = calculate_bourso_fees(estimated_buy_amount)
         
@@ -130,7 +129,6 @@ with st.sidebar:
 
     st.divider()
     
-    # Suppression d'une ligne
     if not st.session_state.portfolio_df.empty:
         st.subheader("🗑️ Supprimer une ligne")
         ticker_to_delete = st.selectbox("Action à supprimer", options=st.session_state.portfolio_df["Ticker"].tolist(), key="del_select")
@@ -153,48 +151,46 @@ if not df_positions.empty:
         if st.button("🔄 Rafraîchir les cours maintenant", use_container_width=True):
             st.rerun()
 
-    # Récupération des cours Yahoo Finance
+    # Récupération individuelle et robuste des cours avec yf.Ticker
+    latest_prices = {}
     with st.spinner("Téléchargement des cours Euronext en temps réel..."):
-        try:
-            market_data = yf.download(tickers_list, period="1d", interval="1m", progress=False)
-            latest_prices = {}
-            for t in tickers_list:
-                try:
-                    if len(tickers_list) == 1:
-                        val = market_data['Close'].iloc[-1]
+        for t in tickers_list:
+            try:
+                tk = yf.Ticker(t)
+                # Tente de récupérer la dernière valeur de clôture/cours du jour
+                hist = tk.history(period="1d")
+                if not hist.empty and 'Close' in hist.columns:
+                    latest_prices[t] = round(float(hist['Close'].iloc[-1]), 3)
+                else:
+                    # Fallback sur fast_info si history est vide
+                    price = tk.fast_info.last_price
+                    if price is not None:
+                        latest_prices[t] = round(float(price), 3)
                     else:
-                        val = market_data['Close'][t].dropna().iloc[-1]
-                    latest_prices[t] = round(float(val), 3)
-                except Exception:
-                    latest_prices[t] = None
-        except Exception:
-            latest_prices = {t: None for t in tickers_list}
+                        latest_prices[t] = None
+            except Exception:
+                latest_prices[t] = None
 
     results = []
     alert_triggered = False
     
     for idx, row in df_positions.iterrows():
         t = row["Ticker"]
-        qty = row["Quantite"]
-        pru = row["PRU"]
-        f_buy = row["FraisAchat"]
-        target = row["GainVise"]
+        qty = float(row["Quantite"])
+        pru = float(row["PRU"])
+        f_buy = float(row["FraisAchat"])
+        target = float(row["GainVise"])
         current = latest_prices.get(t, None)
         
-        # Le calcul des frais se fait à 100% sur le MONTANT EN EUROS (€) de la transaction
         ref_price = current if current else pru
         est_sell_amount_eur = qty * ref_price
         
-        # Calcul automatique selon le montant en €
         f_sell = calculate_bourso_fees(est_sell_amount_eur)
-        
-        # Cout total d'acquisition avec frais d'achat
         total_cost = (qty * pru) + f_buy
         
-        # Prix de vente unitaire minimum pour atteindre le gain net voulu
         min_sell_price = round((total_cost + target + f_sell) / qty, 3)
         
-        if current:
+        if current is not None:
             current_total_val = qty * current
             net_pnl = round(current_total_val - (qty * pru) - f_buy - f_sell, 2)
             is_target_reached = current >= min_sell_price
@@ -207,24 +203,24 @@ if not df_positions.empty:
 
         results.append({
             "Ticker": t,
-            "Qté": qty,
-            "PRU (€)": f"{pru:.2f}",
-            "Montant Inv. (€)": f"{(qty * pru):.2f}",
-            "Frais Achat (€)": f"{f_buy:.2f}",
-            "Frais Vente Est. (€)": f"{f_sell:.2f}",
-            "Gain Visé (€)": f"{target:.2f}",
-            "Cours Cible Min (€)": min_sell_price,
-            "Cours Actuel (€)": current if current else "N/A",
-            "Gain Net Actuel (€)": net_pnl if net_pnl is not None else "N/A",
+            "Qté": int(qty),
+            "PRU (€)": round(pru, 2),
+            "Montant Inv. (€)": round(qty * pru, 2),
+            "Frais Achat (€)": round(f_buy, 2),
+            "Frais Vente Est. (€)": round(f_sell, 2),
+            "Gain Visé (€)": round(target, 2),
+            "Cours Cible Min (€)": round(min_sell_price, 2),
+            "Cours Actuel (€)": round(current, 2) if current is not None else "N/A",
+            "Gain Net Actuel (€)": round(net_pnl, 2) if net_pnl is not None else "N/A",
             "Objectif Atteint": "✅ OUI (VENDRE)" if is_target_reached else "⏳ Non"
         })
 
     df_display = pd.DataFrame(results)
 
-    # METRIQUES CLÉS
     col1, col2, col3 = st.columns(3)
-    total_invested = sum([row["Quantite"] * row["PRU"] + row["FraisAchat"] for idx, row in df_positions.iterrows()])
-    total_net_pnl = sum([r["Gain Net Actuel (€)"] for r in results if isinstance(r["Gain Net Actuel (€)"], (int, float))])
+    total_invested = sum([float(row["Quantite"]) * float(row["PRU"]) + float(row["FraisAchat"]) for idx, row in df_positions.iterrows()])
+    valid_pnls = [r["Gain Net Actuel (€)"] for r in results if isinstance(r["Gain Net Actuel (€)"], (int, float))]
+    total_net_pnl = sum(valid_pnls) if valid_pnls else 0.0
     
     col1.metric("Capital Investi Total", f"{total_invested:.2f} €")
     col2.metric("Plus-Value Nette Globale", f"{total_net_pnl:+.2f} €", delta_color="normal")
@@ -232,7 +228,6 @@ if not df_positions.empty:
 
     st.divider()
 
-    # TABLEAU RECAPITULATIF
     def highlight_alert(row):
         if "OUI" in str(row["Objectif Atteint"]):
             return ['background-color: #d4edda; color: #155724; font-weight: bold'] * len(row)
@@ -240,7 +235,6 @@ if not df_positions.empty:
 
     st.dataframe(df_display.style.apply(highlight_alert, axis=1), use_container_width=True)
 
-    # ALERTE & NOTIFICATIONS
     if alert_triggered:
         st.balloons()
         st.success("🎉 **Objectif atteint sur au moins une position !**")
@@ -252,7 +246,6 @@ if not df_positions.empty:
                     telegram_msg = f"🚀 *ALERTE VENTE PEA* : {r['Ticker']}\n\n• Cours Actuel : `{r['Cours Actuel (€)']} €`\n• Seuil Cible : `{r['Cours Cible Min (€)']} €`\n• Gain Net : `+{r['Gain Net Actuel (€)']} €`"
                     send_telegram_alert(telegram_msg)
 
-    # AUTO REFRESH
     st.divider()
     col_ref, col_info = st.columns([1, 3])
     with col_ref:
